@@ -1,6 +1,6 @@
 /**
  * src/controllers/paymentController.js
- * Handles payment history and stats requests.
+ * Controller for payment-related endpoints.
  */
 
 "use strict";
@@ -8,16 +8,10 @@
 const stellarService = require("../services/stellarService");
 const streamService = require("../services/streamService");
 
-/** Stellar account IDs are 'G' + 55 base32 characters, 56 in total. */
 const STELLAR_PUBLIC_KEY_RE = /^G[A-Z2-7]{55}$/;
 
 /**
  * Validate the body of a payment submission.
- *
- * Every field is checked before anything is stored, so a malformed request
- * never reaches the record store.
- *
- * @returns {{ok: true, value: object} | {ok: false, error: string}}
  */
 function validateSubmission({ senderPublicKey, recipientPublicKey, amount, asset, txHash }) {
   if (!STELLAR_PUBLIC_KEY_RE.test(String(senderPublicKey || ""))) {
@@ -34,38 +28,31 @@ function validateSubmission({ senderPublicKey, recipientPublicKey, amount, asset
   if (!Number.isFinite(parsed) || parsed <= 0) {
     return { ok: false, error: "amount must be a positive number" };
   }
-  // Reject sub-stroop dust: 7 decimal places is the Stellar precision limit, so
-  // anything finer is a rounding artefact rather than a real amount.
   if (parsed < 0.0000001) {
     return { ok: false, error: "amount is below the minimum representable precision" };
   }
 
-  if (asset !== undefined && typeof asset !== "string") {
-    return { ok: false, error: "asset must be a string" };
+  if (asset && !["XLM", "USDC"].includes(asset)) {
+    return { ok: false, error: "asset must be XLM or USDC" };
   }
 
-  if (txHash !== undefined && (typeof txHash !== "string" || !/^[0-9a-f]{64}$/i.test(txHash))) {
-    return { ok: false, error: "txHash must be a 64-character hex transaction hash" };
+  if (
+    txHash !== undefined &&
+    (typeof txHash !== "string" || !/^[0-9a-f]{64}$/i.test(txHash))
+  ) {
+    return {
+      ok: false,
+      error: "txHash must be a 64-character hex transaction hash",
+    };
   }
 
-  return {
-    ok: true,
-    value: {
-      senderPublicKey,
-      recipientPublicKey,
-      amount,
-      asset: asset || "XLM",
-      txHash: txHash || "",
-    },
-  };
+  return { ok: true, value: { senderPublicKey, recipientPublicKey, amount: parsed, asset, txHash } };
 }
 
 /**
  * POST /api/payments/submit
- *
- * Records a payment the client has already signed and submitted to Horizon.
- * Reached only through `requireSignedRequest`, so by the time the body is read
- * the request has been proven fresh and unmodified.
+ * Record a payment the client has already signed and broadcast.
+ * Protected by X-Timestamp / X-Signature replay protection.
  */
 async function submitPayment(req, res, next) {
   try {
@@ -83,8 +70,6 @@ async function submitPayment(req, res, next) {
       submittedAt: new Date(req.requestTimestamp).toISOString(),
     };
 
-    // Plain console to match the rest of the server, which uses morgan rather
-    // than a structured logger.
     console.log(
       `[payment] submission recorded ${validation.value.senderPublicKey} -> ${validation.value.recipientPublicKey} (${validation.value.asset})`
     );
@@ -117,12 +102,10 @@ async function getPayments(req, res, next) {
 
 /**
  * POST /api/payments/submit
- * Submit a signed payment transaction to Horizon.
- *
- * Safe to retry: when an `X-Idempotency-Key` header is supplied, the
- * idempotency middleware replays the cached response for repeats within 24h.
+ * Submit a signed payment. Accepts an optional `X-Idempotency-Key` header (UUID)
+ * so retried submissions replay the original response instead of double-spending.
  */
-async function submitPayment(req, res, next) {
+async function submitSignedTransaction(req, res, next) {
   try {
     const { signedXDR } = req.body || {};
 
@@ -142,7 +125,7 @@ async function submitPayment(req, res, next) {
 
 /**
  * GET /api/payments/:publicKey/stats
- * Computes aggregate payment statistics for a wallet.
+ * Return aggregate stats for an account (total sent, received, count).
  */
 async function getStats(req, res, next) {
   try {
@@ -155,11 +138,12 @@ async function getStats(req, res, next) {
     let receivedCount = 0;
 
     for (const p of payments) {
+      const amt = parseFloat(p.amount) || 0;
       if (p.type === "sent") {
-        totalSent += parseFloat(p.amount);
+        totalSent += amt;
         sentCount++;
-      } else {
-        totalReceived += parseFloat(p.amount);
+      } else if (p.type === "received") {
+        totalReceived += amt;
         receivedCount++;
       }
     }
@@ -167,9 +151,8 @@ async function getStats(req, res, next) {
     res.json({
       success: true,
       data: {
-        publicKey,
-        totalSentXLM: totalSent.toFixed(7),
-        totalReceivedXLM: totalReceived.toFixed(7),
+        totalSent: totalSent.toFixed(7),
+        totalReceived: totalReceived.toFixed(7),
         sentCount,
         receivedCount,
         totalTransactions: sentCount + receivedCount,
@@ -182,7 +165,7 @@ async function getStats(req, res, next) {
 
 /**
  * GET /api/payments/stream-status/:streamId
- * Returns status of a Soroban streaming payment contract.
+ * Return the status of a Soroban streaming payment contract.
  */
 async function getStreamStatus(req, res, next) {
   try {
@@ -194,4 +177,4 @@ async function getStreamStatus(req, res, next) {
   }
 }
 
-module.exports = { getPayments, getStats, getStreamStatus, submitPayment };
+module.exports = { submitPayment, getPayments, submitSignedTransaction, getStats, getStreamStatus };

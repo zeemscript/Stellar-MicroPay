@@ -10,6 +10,7 @@ const jwt = require("jsonwebtoken");
 const analyticsService = require("../src/services/analyticsService");
 const stellarService = require("../src/services/stellarService");
 const loggerModule = require("../src/utils/logger");
+const { JWT_SECRET } = require("../src/middleware/auth");
 const {
   clearAnalyticsCache,
   startCacheSweep,
@@ -21,14 +22,16 @@ const {
 // Mock Stellar service
 jest.mock("../src/services/stellarService");
 
+
 describe("Analytics Service", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     jest.clearAllMocks();
     clearAnalyticsCache();
-    analyticsService.clearCache("GBRPYHIL2CI3WHZDTOOQFC6EB4KJJGUJLVXKJ46ZGFWTTNQNXNHTJXW");
+    await analyticsService.clearCache("GBRPYHIL2CI3WHZDTOOQFC6EB4KJJGUJLVXKJ46ZGFWTTNQNXNHTJXW");
   });
 
-  const testPublicKey = "GBRPYHIL2CI3WHZDTOOQFC6EB4KJJGUJLVXKJ46ZGFWTTNQNXNHTJXW";
+  const testPublicKey =
+    "GBRPYHIL2CI3WHZDTOOQFC6EB4KJJGUJLVXKJ46ZGFWTTNQNXNHTJXW";
 
   const mockPayments = [
     {
@@ -163,7 +166,9 @@ describe("Analytics Service", () => {
     });
 
     it("should return empty array when no sent payments", async () => {
-      const receivedPayments = mockPayments.filter((p) => p.type === "received");
+      const receivedPayments = mockPayments.filter(
+        (p) => p.type === "received",
+      );
       stellarService.getPayments.mockResolvedValue(receivedPayments);
 
       const result = await analyticsService.getTopRecipients(testPublicKey);
@@ -239,7 +244,7 @@ describe("Analytics Service", () => {
 
       const totalCount = result.activityByDay.reduce(
         (sum, day) => sum + day.transactionCount,
-        0
+        0,
       );
       expect(totalCount).toBe(5);
     });
@@ -276,8 +281,10 @@ describe("Analytics Service", () => {
       await analyticsService.getSummary(testPublicKey);
       expect(stellarService.getPayments).toHaveBeenCalledTimes(1);
 
-      analyticsService.clearCache(testPublicKey);
+      // Clear cache
+      await analyticsService.clearCache(testPublicKey);
 
+      // Third call — should fetch again
       await analyticsService.getSummary(testPublicKey);
       expect(stellarService.getPayments).toHaveBeenCalledTimes(2);
     });
@@ -289,8 +296,8 @@ describe("Analytics Service", () => {
       await analyticsService.getTopRecipients(testPublicKey);
       await analyticsService.getActivityByDay(testPublicKey);
 
-      expect(analyticsService.clearCache(testPublicKey)).toBe(3);
-      expect(analyticsService.clearCache(testPublicKey)).toBe(0);
+      expect(await analyticsService.clearCache(testPublicKey)).toBe(3);
+      expect(await analyticsService.clearCache(testPublicKey)).toBe(0);
     });
   });
 
@@ -380,40 +387,6 @@ describe("Analytics Service", () => {
 
 describe("Analytics Service Cache Archiving (#1210)", () => {
   beforeEach(() => {
-    clearAnalyticsCache();
-    jest.useFakeTimers();
-  });
-
-  afterEach(() => {
-    stopCacheSweep();
-    jest.useRealTimers();
-  });
-
-  it("evicts entries older than 1 hour during sweep and logs eviction count", () => {
-    const logSpy = jest.spyOn(loggerModule, "info").mockImplementation(() => {});
-
-    setCachedAnalytics("G_TEST_USER_1", { volume: 100 });
-    expect(getCachedAnalytics("G_TEST_USER_1")).toEqual({ volume: 100 });
-
-    jest.advanceTimersByTime(61 * 60 * 1000);
-    jest.advanceTimersByTime(10 * 60 * 1000);
-
-    expect(getCachedAnalytics("G_TEST_USER_1")).toBeNull();
-    expect(logSpy).toHaveBeenCalledWith("Cache sweep: evicted 1 entries");
-
-    logSpy.mockRestore();
-  });
-
-  it("stops cache sweep correctly when stopCacheSweep is called", () => {
-    const clearIntervalSpy = jest.spyOn(global, "clearInterval");
-    stopCacheSweep();
-    expect(clearIntervalSpy).toHaveBeenCalled();
-    clearIntervalSpy.mockRestore();
-  });
-});
-
-describe('Analytics Service Cache Archiving (#1210)', () => {
-  beforeEach(() => {
     // The sweep interval is created at module load, i.e. before fake timers are
     // installed, so re-arm it here to make it observable by the fake clock.
     stopCacheSweep();
@@ -427,13 +400,15 @@ describe('Analytics Service Cache Archiving (#1210)', () => {
     jest.useRealTimers();
   });
 
-  it('evicts entries older than 1 hour during sweep and logs eviction count', () => {
-    const logSpy = jest.spyOn(loggerModule, 'info').mockImplementation(() => {});
+  it("evicts entries older than 1 hour during sweep and logs eviction count", () => {
+    const logSpy = jest
+      .spyOn(loggerModule, "info")
+      .mockImplementation(() => {});
 
     // Set an entry with current timestamp
-    setCachedAnalytics('G_TEST_USER_1', { volume: 100 });
-    
-    expect(getCachedAnalytics('G_TEST_USER_1')).toEqual({ volume: 100 });
+    setCachedAnalytics("G_TEST_USER_1", { volume: 100 });
+
+    expect(getCachedAnalytics("G_TEST_USER_1")).toEqual({ volume: 100 });
 
     // Advance time past 1 hour (e.g., 61 minutes)
     jest.advanceTimersByTime(61 * 60 * 1000);
@@ -443,14 +418,14 @@ describe('Analytics Service Cache Archiving (#1210)', () => {
     jest.advanceTimersByTime(10 * 60 * 1000);
 
     // Verify entry has been evicted
-    expect(getCachedAnalytics('G_TEST_USER_1')).toBeNull();
-    expect(logSpy).toHaveBeenCalledWith('Cache sweep: evicted 1 entries');
+    expect(getCachedAnalytics("G_TEST_USER_1")).toBeNull();
+    expect(logSpy).toHaveBeenCalledWith("Cache sweep: evicted 1 entries");
 
     logSpy.mockRestore();
   });
 
-  it('stops cache sweep correctly when stopCacheSweep is called', () => {
-    const clearIntervalSpy = jest.spyOn(global, 'clearInterval');
+  it("stops cache sweep correctly when stopCacheSweep is called", () => {
+    const clearIntervalSpy = jest.spyOn(global, "clearInterval");
     stopCacheSweep();
     expect(clearIntervalSpy).toHaveBeenCalled();
     clearIntervalSpy.mockRestore();

@@ -8,7 +8,7 @@
 const express = require("express");
 const router = express.Router();
 const { strictLimiter } = require("../middleware/rateLimit");
-const { validatePublicKey, sanitizeUsername } = require("../middleware/sanitization");
+const { validatePublicKey, sanitizeUsername, sanitizePublicKey } = require("../middleware/sanitization");
 const accountController = require("../controllers/accountController");
 const { horizonCircuitBreakerMiddleware } = require("../middleware/horizonCircuitBreaker");
 
@@ -48,6 +48,19 @@ router.get("/:publicKey/balance", strictLimiter, validatePublicKey(), horizonCir
  * Fetch user's transaction streak.
  */
 router.get("/:publicKey/streaks", strictLimiter, validatePublicKey(), accountController.getStreaks);
+
+/**
+ * GET /api/accounts/:publicKey/assets
+ * List all non-native asset trustlines (code, issuer, balance, limit) (#1065).
+ * Requires a valid SEP-0010 JWT.
+ */
+router.get("/:publicKey/assets", strictLimiter, verifyJWT, validatePublicKey(), accountController.getAccountAssets);
+
+/**
+ * GET /api/accounts/:publicKey/memo-history
+ * Fetch N most-recently used distinct memo texts for an account. JWT-protected.
+ */
+router.get("/:publicKey/memo-history", strictLimiter, verifyJWT, sanitizePublicKey, accountController.getMemoHistory);
 
 /**
  * POST /api/accounts/register

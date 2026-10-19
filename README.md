@@ -1,5 +1,9 @@
 # Stellar-MicroPay: Streaming Payment Channels using Soroban
 
+[![Discord](https://img.shields.io/badge/Discord-%23greenpay-5865F2?logo=discord&logoColor=white)](https://discord.gg/greenpay)
+[![Telegram](https://img.shields.io/badge/Telegram-GreenPay%20Community-2CA5E0?logo=telegram&logoColor=white)](https://t.me/greenpay_community)
+[![Hacktoberfest](https://img.shields.io/badge/Hacktoberfest-2026-orange?logo=hacktoberfest&logoColor=white)](https://hacktoberfest.com)
+
 ## Overview
 
 This project implements a Soroban smart contract for streaming payment channels on the Stellar network. The contract allows a payer to deposit XLM and stream it to a recipient at a defined rate (e.g., 1 XLM per hour). The recipient can claim the streamed amount at any time.
@@ -115,6 +119,9 @@ pub struct Stream {
 - Whether the contract is currently frozen
 
 ## Security Features
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md). It also covers
+the threat model, scope and response times.
 
 - **Authorization**: Only recipients can claim, only payers can close/top-up
 - **Rate Validation**: Rates must be positive and within the admin cap
@@ -233,6 +240,8 @@ docker pull ghcr.io/emmy123222/stellar-micropay-backend:latest
 docker pull ghcr.io/emmy123222/stellar-micropay-frontend:latest
 ```
 
+To run the stack locally, see the [Docker Compose matrix](docs/deployment.md#compose-matrix). It covers which compose file to use for dev, test, staging and prod.
+
 ### Manual Setup
 
 1. Install Rust and Soroban SDK
@@ -265,9 +274,19 @@ docker pull ghcr.io/emmy123222/stellar-micropay-frontend:latest
 ## Documentation
 
 - [📖 Stellar & Soroban Glossary](GLOSSARY.md) — Plain-English guide to Stellar and Soroban terminology (XLM, stroops, ledgers, sequence numbers, Horizon, Soroban, XDR, Freighter, SEP-0007, SEP-0010, trustlines, federation, and turrets).
-- [🤝 Contributing Guide](CONTRIBUTING.md) — Guidelines for contributing and setting up the development environment.
+- [🤝 Contributing Guide](CONTRIBUTING.md) — Guidelines for contributing and setting up the development environment, including how to [add a new locale](docs/i18n.md).
+- [🌍 Adding a New Locale](docs/i18n.md) — Step-by-step guide to shipping a translation: catalog structure, registration in `frontend/lib/i18n.ts`, key parity, fallback, quality rules and the i18n test suites.
 - [🚀 Deployment Guide](DEPLOYMENT_GUIDE.md) — Instructions for deploying to production.
+- [🐳 Docker Compose matrix](docs/deployment.md#compose-matrix) — Which compose file and Dockerfile to use for dev, test, staging and prod, with required secrets, up commands and known issues.
 - [📚 Technical Architecture & Docs](docs/) — Detailed documentation on architecture, Ledger hardware wallet support, Turrets, analytics, and APIs.
+
+## 💬 Community & Discussion
+
+Connect with contributors, ask questions, and share ideas:
+- **Discord**: Join our community Discord in the [#greenpay](https://discord.gg/greenpay) channel.
+- **Telegram**: Join the [GreenPay Community](https://t.me/greenpay_community) Telegram group.
+- **Hacktoberfest**: Check out our [Contributing Guide](CONTRIBUTING.md#hacktoberfest) to get started on open issues during October!
+
 ## Contributors
 
 Thanks to everyone who has contributed to Stellar-MicroPay! 🎉

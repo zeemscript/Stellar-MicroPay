@@ -17,7 +17,7 @@ require("dotenv").config();
 const HORIZON_URL =
   process.env.HORIZON_URL || "https://horizon-testnet.stellar.org";
 
-// ─── In-memory LRU cache for getAccountStreaks (1 hour TTL) ─────────────────
+
 const server = new Horizon.Server(HORIZON_URL);
 
 const USDC_ISSUERS = new Set(
@@ -46,6 +46,7 @@ async function getAccount(publicKey) {
         assetCode: b.asset_code,
         balance: b.balance,
         assetIssuer: b.asset_issuer,
+        limit: b.limit,
         asset_type: b.asset_type,
       };
     });
@@ -66,6 +67,31 @@ async function getAccount(publicKey) {
     }
     throw err;
   }
+}
+
+/**
+ * Get all non-native assets the account holds trustlines for (#1065).
+ *
+ * Native XLM is excluded — callers that need it can use getAccount or
+ * getXLMBalance. The result is suitable for "which of my assets can I send"
+ * pickers in the frontend.
+ *
+ * @param {string} publicKey - Stellar public key (G...)
+ * @returns {Promise<Array<{assetCode: string, assetIssuer: string, balance: string, limit: string}>>}
+ */
+async function getAccountAssets(publicKey) {
+  validatePublicKey(publicKey);
+
+  const { balances } = await getAccount(publicKey);
+
+  return balances
+    .filter((b) => b.asset_type !== "native")
+    .map((b) => ({
+      assetCode: b.assetCode,
+      assetIssuer: b.assetIssuer,
+      balance: b.balance,
+      limit: b.limit,
+    }));
 }
 
 /**
@@ -159,6 +185,52 @@ async function getPayments(publicKey, { limit = 20, cursor } = {}) {
   }
 
   return payments;
+}
+
+/**
+ * Get N most-recently used distinct MEMO_TEXT memos for an account.
+ *
+ * @param {string} publicKey - Stellar public key (G...)
+ * @param {object} [options]
+ * @param {number} [options.limit=10] - Maximum number of distinct memos to return
+ * @returns {Promise<string[]>} List of distinct memo strings
+ */
+async function getMemoHistory(publicKey, { limit = 10 } = {}) {
+  validatePublicKey(publicKey);
+
+  const query = server.payments().forAccount(publicKey).limit(200).order("desc");
+  const result = await withCircuitBreaker(() => query.call());
+
+  const distinctMemos = [];
+  const seen = new Set();
+
+  for (const op of result.records) {
+    if (op.type !== "payment") continue;
+
+    let memoText;
+    try {
+      const tx = typeof op.transaction === "function" ? await op.transaction() : op.transaction;
+      if (tx && (tx.memo_type === "text" || tx.memo_type === "MEMO_TEXT") && tx.memo) {
+        memoText = tx.memo;
+      }
+    } catch {
+      // memo is optional
+    }
+
+    if (!memoText && (op.memo_type === "text" || op.memo_type === "MEMO_TEXT") && op.memo) {
+      memoText = op.memo;
+    }
+
+    if (memoText && !seen.has(memoText)) {
+      seen.add(memoText);
+      distinctMemos.push(memoText);
+      if (distinctMemos.length >= limit) {
+        break;
+      }
+    }
+  }
+
+  return distinctMemos;
 }
 
 /**
@@ -312,8 +384,10 @@ async function getAccountStreaks(publicKey) {
 
 module.exports = {
   getAccount,
+  getAccountAssets,
   getXLMBalance,
   getPayments,
+  getMemoHistory,
   getAccountStreaks,
   clearStreaksCache,
   hasUSDCTrustline,

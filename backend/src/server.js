@@ -12,11 +12,13 @@ const pinoHttp = require("pino-http");
 const crypto = require("node:crypto");
 const rateLimit = require("express-rate-limit");
 require("dotenv").config();
+const { csrfProtection } = require("./middleware/csrf");
 
 // ─── Env Validation ───────────────────────────────────────────────────────────
 // Must run immediately after dotenv so missing vars are caught before any
 // service or route module tries to use them.
-const { validateEnv } = require("./validateEnv");
+const { validateEnv, loadSecrets } = require("./config/validateEnv");
+loadSecrets();
 validateEnv();
 
 const accountRoutes = require("./routes/accounts");
@@ -27,16 +29,14 @@ const healthRoutes = require("./routes/health");
 const federationRoutes = require("./routes/federation");
 const turretsRoutes = require("./routes/turrets");
 const tipsRoutes = require("./routes/tips");
-const contactsRoutes = require("./routes/contacts");
+const pushRoutes = require("./routes/push");
 const webhooksRoutes = require("./routes/webhooks");
-const networkRoutes = require("./routes/network");
-const priceAlertsRoutes = require("./routes/priceAlerts");
+const requestId = require("./middleware/requestId");
 const swaggerUi = require("swagger-ui-express");
 const swaggerSpec = require("./swagger");
 const { startTurretsServer } = require("./turretsServer");
 const logger = require("./logger");
 const { sanitizeRequest } = require("./middleware/sanitization");
-const { csrfProtection } = require("./middleware/csrf");
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -63,7 +63,7 @@ app.use(
   pinoHttp({
     logger,
     customProps: (req) => ({ requestId: req.requestId }),
-  })
+  }),
 );
 app.use(express.json({ limit: "10kb" }));
 
@@ -97,12 +97,17 @@ app.use(
       }
     },
     methods: ["GET", "POST", "DELETE"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Request-ID", "X-Idempotency-Key"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Request-ID",
+      "X-Idempotency-Key",
+    ],
     exposedHeaders: ["X-Request-ID", "X-Idempotency-Replayed"],
     credentials: true,
     optionsSuccessStatus: 204,
     maxAge: 600,
-  })
+  }),
 );
 
 // ─── CSRF Protection ────────────────────────────────────────────────────────
@@ -146,14 +151,21 @@ app.use("/federation", federationRoutes);
 if (process.env.METRICS_ENABLED === "true") {
   const client = require("prom-client");
   client.collectDefaultMetrics();
-  app.get("/metrics", (req, res) => { res.set("Content-Type", client.register.contentType); res.end(client.register.metrics()); });
+  app.get("/metrics", (req, res) => {
+    res.set("Content-Type", client.register.contentType);
+    res.end(client.register.metrics());
+  });
 }
 
-app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
-  customSiteTitle: "Stellar MicroPay API Docs",
-  customCss: ".swagger-ui .topbar { display: none }",
-  swaggerOptions: { url: "/api/docs.json" },
-}));
+app.use(
+  "/api/docs",
+  swaggerUi.serve,
+  swaggerUi.setup(swaggerSpec, {
+    customSiteTitle: "Stellar MicroPay API Docs",
+    customCss: ".swagger-ui .topbar { display: none }",
+    swaggerOptions: { url: "/api/docs.json" },
+  }),
+);
 
 app.get("/api/docs.json", (req, res) => {
   res.setHeader("Content-Type", "application/json");
@@ -189,6 +201,7 @@ SERVER = "https://${domain}/federation"
 if (require.main === module) {
   // Refuse to start on an insecure configuration rather than serving traffic
   // with a publicly-known signing key.
+  loadSecrets();
   validateEnv();
 
   const server = app.listen(PORT, () => {

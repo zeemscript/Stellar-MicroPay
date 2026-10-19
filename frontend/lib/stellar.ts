@@ -1157,7 +1157,7 @@ export async function buildHomeDomainTransaction({
 
 /** Stellar Expert URL for an issued asset, e.g. `.../asset/COOL-GABC...`. */
 export function assetExplorerUrl(assetCode: string, issuer: string): string {
-  const net = getNetwork() === "mainnet" ? "public" : "testnet";
+  const net = getNetworkConfig().network === "mainnet" ? "public" : "testnet";
   return `https://stellar.expert/explorer/${net}/asset/${assetCode}-${issuer}`;
 }
 
@@ -1187,97 +1187,8 @@ export function buildStellarToml({
   issuerPublicKey: string;
   network?: "testnet" | "mainnet";
 }): string {
-  const activeNetwork = network ?? getNetwork();
-  const accounts = [issuerPublicKey];
-
-  if (activeNetwork === "mainnet") {
-    accounts.push("GCO2IP3MCPLXT4GMQ5H7UQRCLHH3QDEM7SY6DNNJDAW6DGRITQKHXVV");
-  }
-
-  const domain =
-    homeDomain.trim().replace(/^https?:\/\//i, "").replace(/\/.*$/, "") ||
-    "yourdomain.com";
-
-  return [
-    "# Stellar MicroPay — generated asset metadata (SEP-0001)",
-    `VERSION = "1.0.0"`,
-    `NETWORK_PASSPHRASE = "${
-      activeNetwork === "mainnet" ? Networks.PUBLIC : Networks.TESTNET
-    }"`,
-    "",
-    "[[CURRENCIES]]",
-    `code = "${assetCode}"`,
-    `issuer = "${issuerPublicKey}"`,
-    "is_asset_anchored = false",
-    `desc = "${assetCode} issued via Stellar MicroPay"`,
-    "",
-    "# Liquidity/explorer accounts that must be trusted for mainnet listings.",
-    "ACCOUNTS = [",
-    ...accounts.map((account) => `  "${account}",`),
-    "]",
-    "",
-    `# Publish this file at: ${stellarTomlUrl(domain)}`,
-    "",
-  ].join("\n");
-}
-
-/**
- * Build an unsigned `setOptions` transaction that sets an account's home domain.
- *
- * The domain must serve a `stellar.toml` under `/.well-known/` for wallets and
- * explorers to discover the issuer's asset metadata (SEP-0001).
- */
-export async function buildHomeDomainTransaction({
-  publicKey,
-  homeDomain,
-}: {
-  publicKey: string;
-  homeDomain: string;
-}): Promise<Transaction> {
-  const sourceAccount = await server.loadAccount(publicKey);
-
-  return new TransactionBuilder(sourceAccount, {
-    fee: STELLAR_BASE_FEE_STROOPS_STRING,
-    networkPassphrase: getNetworkPassphrase(),
-  })
-    .addOperation(Operation.setOptions({ homeDomain }))
-    .setTimeout(STELLAR_TRANSACTION_TIMEOUT_SECONDS)
-    .build();
-}
-
-/** Stellar Expert URL for an issued asset, e.g. `.../asset/COOL-GABC...`. */
-export function assetExplorerUrl(assetCode: string, issuer: string): string {
-  const net = getNetwork() === "mainnet" ? "public" : "testnet";
-  return `https://stellar.expert/explorer/${net}/asset/${assetCode}-${issuer}`;
-}
-
-/** SEP-0001 `stellar.toml` location for a home domain. */
-export function stellarTomlUrl(homeDomain: string): string {
-  const hostname = homeDomain
-    .trim()
-    .replace(/^https?:\/\//i, "")
-    .replace(/\/.*$/, "");
-  return `https://${hostname}/.well-known/stellar.toml`;
-}
-
-/**
- * Render the `stellar.toml` an issuer should publish for a custom asset.
- *
- * Returning it as a string lets the wizard offer a preview, a copy button and a
- * download without the user hand-writing TOML.
- */
-export function buildStellarToml({
-  homeDomain,
-  assetCode,
-  issuerPublicKey,
-  network,
-}: {
-  homeDomain: string;
-  assetCode: string;
-  issuerPublicKey: string;
-  network?: "testnet" | "mainnet";
-}): string {
-  const activeNetwork = network ?? getNetwork();
+  const activeNetwork =
+    network ?? (getNetworkConfig().network === "mainnet" ? "mainnet" : "testnet");
   const accounts = [issuerPublicKey];
 
   if (activeNetwork === "mainnet") {
@@ -1737,6 +1648,22 @@ export async function getContractTipTotal(recipient: string): Promise<string> {
 
 // ─── NFT Receipts ───────────────────────────────────────────────────────────
 
+/** Soroban `Symbol` values allow at most 32 characters from `[a-zA-Z0-9_]`. */
+export const RECEIPT_MEMO_SYMBOL_MAX_LENGTH = 32;
+
+/**
+ * Convert a free-form payment memo into a valid Soroban `Symbol` for
+ * `mint_receipt`. Disallowed characters (spaces, punctuation, unicode) become
+ * underscores so a memo like "rent – May" doesn't make the host reject the
+ * invocation.
+ */
+export function toReceiptMemoSymbol(memo?: string): string {
+  return (memo ?? "")
+    .trim()
+    .replace(/[^a-zA-Z0-9_]/g, "_")
+    .slice(0, RECEIPT_MEMO_SYMBOL_MAX_LENGTH);
+}
+
 /**
  * Build a Soroban contract invocation to mint a payment receipt (NFT).
  * Simulates/preflights the transaction so it's ready for signing.
@@ -1760,8 +1687,7 @@ export async function buildReceiptMintTransaction({
   const contract = new Contract(CONTRACT_ID);
 
   const stroops = BigInt(Math.round(parseFloat(amount) * 10_000_000));
-  const memoStr = (memo ?? "").slice(0, 28);
-  const memoScVal = nativeToScVal(memoStr, { type: "symbol" });
+  const memoScVal = nativeToScVal(toReceiptMemoSymbol(memo), { type: "symbol" });
 
   const tx = new TransactionBuilder(sourceAccount, {
     fee: "100",
@@ -1814,6 +1740,73 @@ export async function getReceiptCount(payer: string): Promise<number> {
   } catch {
     return 0;
   }
+}
+
+/** A receipt as stored by the contract's `get_receipt`. */
+export interface OnChainReceipt {
+  /** Zero-based index of this receipt in the payer's receipt list. */
+  index: number;
+  from: string;
+  to: string;
+  /** Amount in stroops, as a decimal string. */
+  amountStroops: string;
+  /** Ledger close time (unix seconds) when the receipt was minted. */
+  timestamp: number;
+  memo: string;
+  ledger: number;
+}
+
+/**
+ * Read a single receipt for `payer` at `index` via simulation.
+ * Throws with the contract's message (e.g. "Receipt not found") on failure so
+ * callers can surface it — unlike {@link getReceiptCount}, which falls back to 0.
+ */
+export async function getReceipt(payer: string, index: number): Promise<OnChainReceipt> {
+  if (!CONTRACT_ID) {
+    throw new Error("Contract ID is not configured.");
+  }
+
+  const contract = new Contract(CONTRACT_ID);
+  const tx = new TransactionBuilder(
+    new Account(payer, "0"),
+    { fee: STELLAR_BASE_FEE_STROOPS_STRING, networkPassphrase: getNetworkPassphrase() }
+  )
+    .addOperation(
+      contract.call(
+        "get_receipt",
+        nativeToScVal(payer, { type: "address" }),
+        nativeToScVal(index, { type: "u32" })
+      )
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await sorobanServer.simulateTransaction(tx);
+  if (rpc.Api.isSimulationError(sim)) {
+    throw new Error(sim.error);
+  }
+  if (!rpc.Api.isSimulationSuccess(sim) || !sim.result) {
+    throw new Error("Receipt lookup returned no result.");
+  }
+
+  const raw = scValToNative(sim.result.retval) as {
+    from: string;
+    to: string;
+    amount: bigint | number | string;
+    timestamp: bigint | number;
+    memo: string;
+    ledger: number;
+  };
+
+  return {
+    index,
+    from: String(raw.from),
+    to: String(raw.to),
+    amountStroops: raw.amount.toString(),
+    timestamp: Number(raw.timestamp),
+    memo: String(raw.memo ?? ""),
+    ledger: Number(raw.ledger),
+  };
 }
 
 export async function getRecentPaymentsForSparkline(
