@@ -1,8 +1,14 @@
 # Stellar-MicroPay: Streaming Payment Channels using Soroban
 
+[![Discord](https://img.shields.io/badge/Discord-%23greenpay-5865F2?logo=discord&logoColor=white)](https://discord.gg/greenpay)
+[![Telegram](https://img.shields.io/badge/Telegram-GreenPay%20Community-2CA5E0?logo=telegram&logoColor=white)](https://t.me/greenpay_community)
+[![Hacktoberfest](https://img.shields.io/badge/Hacktoberfest-2026-orange?logo=hacktoberfest&logoColor=white)](https://hacktoberfest.com)
+
 ## Overview
 
 This project implements a Soroban smart contract for streaming payment channels on the Stellar network. The contract allows a payer to deposit XLM and stream it to a recipient at a defined rate (e.g., 1 XLM per hour). The recipient can claim the streamed amount at any time.
+
+For an introduction to Stellar and Soroban terminology (such as stroops, ledgers, XDR, Freighter, and Turrets), consult the [Stellar & Soroban Glossary](GLOSSARY.md).
 
 ## Features
 
@@ -50,6 +56,7 @@ pub struct Stream {
     pub deposited: i128,          // Total amount deposited (in stroops)
     pub claimed: i128,            // Total amount claimed (in stroops)
     pub start_ledger: u32,        // Ledger number when stream started
+    pub token: Address,           // Token escrowed at open time
 }
 ```
 
@@ -81,30 +88,77 @@ pub struct Stream {
 #### `get_claimable(stream_id) -> i128`
 - Calculates claimable amount without claiming
 
+#### `get_stream_history(stream_id) -> Vec<StreamEvent>`
+- Returns the full append-only event log for a stream
+- Each entry records the `event_type` (`claim` / `topup` / `close`), the
+  `amount`, and the `ledger` it happened on
+
+#### `get_stream_count() -> u32`
+- Returns the number of streams ever opened
+
+## Administration
+
+#### `set_max_rate(admin, max_rate)`
+- Sets an admin-configurable cap on `rate_per_ledger` for new streams
+- `open_stream` rejects any rate above the cap with `ContractError::RateTooHigh`
+- A cap of `0` (the default) disables the cap entirely
+- Lowering the cap does not affect streams that already exist
+
+#### `get_max_rate() -> i128`
+- Returns the current cap (`0` means uncapped)
+
+#### `freeze(admin)` / `unfreeze(admin)`
+- `freeze` sets a `Frozen` flag that blocks every state-changing entry point
+  with `ContractError::Frozen`
+- `unfreeze` clears it
+- Read-only getters (`get_stream`, `get_claimable`, `get_stream_history`,
+  `is_frozen`, …) keep working while frozen, so monitoring and incident
+  response are not blinded by a freeze
+
+#### `is_frozen() -> bool`
+- Whether the contract is currently frozen
+
 ## Security Features
 
+To report a vulnerability, see [SECURITY.md](SECURITY.md). It also covers
+the threat model, scope and response times.
+
 - **Authorization**: Only recipients can claim, only payers can close/top-up
-- **Rate Validation**: Rates must be positive
+- **Rate Validation**: Rates must be positive and within the admin cap
 - **Deposit Validation**: Deposits must be positive
-- **Overflow Protection**: Uses checked arithmetic operations
+- **Overflow Protection**: Saturating arithmetic; accrual is capped at the
+  funded window so `total_streamed <= deposited` holds structurally
+- **Emergency Pause**: Admin can freeze all state changes without a redeploy
 - **Access Control**: Proper authentication checks for all operations
 
 ## Mathematical Calculations
 
 ### Claimable Amount Calculation
 ```
-elapsed_ledgers = current_ledger - start_ledger
-total_streamed = rate_per_ledger * elapsed_ledgers
-claimable = total_streamed - claimed
-actual_claim = min(claimable, deposited - claimed)
+elapsed_ledgers = current_ledger - start_ledger // ledgers elapsed since start
+total_streamed = rate_per_ledger * elapsed_ledgers // amount accrued to date
+claimable = total_streamed - claimed // accrued funds not yet claimed
+actual_claim = min(claimable, deposited - claimed) // cap at funds still deposited
 ```
+With zero elapsed ledgers, nothing new is claimable. Once the deposit is exhausted,
+the remaining-deposit cap keeps further claims at zero.
+
+Capping `elapsed_ledgers` at `funded_ledgers` before the multiply is what makes
+the arithmetic total: the product is bounded by `deposited`, so it can neither
+overflow `i128` nor exceed the escrow, for any combination of inputs.
 
 ### Refund Calculation
 ```
-elapsed_ledgers = current_ledger - start_ledger
-total_streamed = rate_per_ledger * elapsed_ledgers
-refundable = deposited - max(total_streamed, claimed)
+elapsed_ledgers = current_ledger - start_ledger // ledgers elapsed since start
+total_streamed = rate_per_ledger * elapsed_ledgers // amount accrued to date
+refundable = deposited - max(total_streamed, claimed) // funds neither streamed nor claimed
 ```
+With zero elapsed ledgers and no prior claims, the full deposit is refundable.
+When the stream is exhausted, the maximum reaches the deposit and the refund is zero.
+
+Claims and refunds split the deposit exactly: `claimed + refundable == deposited`
+for any claim schedule, which `test_close_stream_after_claims` and
+`fuzz_repeated_claims_never_exceed_deposit` both assert.
 
 ## Usage Examples
 
@@ -158,6 +212,22 @@ The contract includes comprehensive tests covering:
 - Close and refund calculations
 - Authorization and validation
 - Error conditions
+- Rate cap at, below, and above the configured maximum
+- Stream event log contents and ordering
+- Frozen and unfrozen behavior across every entry point
+
+Run everything with `cargo test`, or just the property tests with:
+
+```bash
+cargo test fuzz -- --nocapture
+```
+
+The property tests replay saved counterexamples from
+`contracts/stellar-micropay-contract/proptest-regressions/lib.txt` before
+generating new cases, so a bug found once stays covered.
+
+The wasm build is not exercised by `cargo test`; it requires stellar-cli
+v25.2.0+ (`stellar contract build`). CI runs the same check.
 
 ## Installation and Deployment
 
@@ -170,21 +240,29 @@ docker pull ghcr.io/emmy123222/stellar-micropay-backend:latest
 docker pull ghcr.io/emmy123222/stellar-micropay-frontend:latest
 ```
 
+To run the stack locally, see the [Docker Compose matrix](docs/deployment.md#compose-matrix). It covers which compose file to use for dev, test, staging and prod.
+
 ### Manual Setup
 
 1. Install Rust and Soroban SDK
 2. Clone this repository
-3. Build the contract: `cargo build --release --target wasm32-unknown-unknown`
+3. Build the contract: `stellar contract build` (soroban-sdk 28 requires
+   stellar-cli v25.2.0+ for the wasm build)
 4. Deploy to Stellar testnet/mainnet
 5. Initialize contract with required parameters
 
 ## Acceptance Criteria Met
 
-✅ **cargo test passes for all streaming tests**
+✅ **`cargo test` passes for all streaming tests** (36 tests)
 ✅ **Claim amount calculated correctly at any ledger offset**
 ✅ **Top-up increases the stream duration**
-✅ **Close refunds the correct unclaimed amount**
+✅ **Close refunds the correct unclaimed amount** — `claimed + refund == deposited`
 ✅ **Only the recipient can claim, only the payer can close**
+✅ **Admin-configurable rate cap** — `set_max_rate`, `0` disables it
+✅ **No arithmetic panic for arbitrary inputs** — proptest over 1000 random
+   `(rate, elapsed, deposit, claimed)` tuples
+✅ **Full claim/top-up history** — `get_stream_history` returns the event log
+✅ **Emergency pause** — `freeze` / `unfreeze`, read-only getters stay available
 
 ## Technical Details
 
@@ -192,6 +270,22 @@ docker pull ghcr.io/emmy123222/stellar-micropay-frontend:latest
 - **Gas Efficiency**: Efficient storage and computation patterns
 - **Security**: Comprehensive input validation and access controls
 - **Compliance**: Follows Soroban best practices and standards
+
+## Documentation
+
+- [📖 Stellar & Soroban Glossary](GLOSSARY.md) — Plain-English guide to Stellar and Soroban terminology (XLM, stroops, ledgers, sequence numbers, Horizon, Soroban, XDR, Freighter, SEP-0007, SEP-0010, trustlines, federation, and turrets).
+- [🤝 Contributing Guide](CONTRIBUTING.md) — Guidelines for contributing and setting up the development environment, including how to [add a new locale](docs/i18n.md).
+- [🌍 Adding a New Locale](docs/i18n.md) — Step-by-step guide to shipping a translation: catalog structure, registration in `frontend/lib/i18n.ts`, key parity, fallback, quality rules and the i18n test suites.
+- [🚀 Deployment Guide](DEPLOYMENT_GUIDE.md) — Instructions for deploying to production.
+- [🐳 Docker Compose matrix](docs/deployment.md#compose-matrix) — Which compose file and Dockerfile to use for dev, test, staging and prod, with required secrets, up commands and known issues.
+- [📚 Technical Architecture & Docs](docs/) — Detailed documentation on architecture, Ledger hardware wallet support, Turrets, analytics, and APIs.
+
+## 💬 Community & Discussion
+
+Connect with contributors, ask questions, and share ideas:
+- **Discord**: Join our community Discord in the [#greenpay](https://discord.gg/greenpay) channel.
+- **Telegram**: Join the [GreenPay Community](https://t.me/greenpay_community) Telegram group.
+- **Hacktoberfest**: Check out our [Contributing Guide](CONTRIBUTING.md#hacktoberfest) to get started on open issues during October!
 
 ## Contributors
 

@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { formatAssetPrecise, formatDateFull } from "@/utils/intlFormatters";
+import { useTranslation } from "@/contexts/I18nContext";
 
 export type PaymentStepId = "building" | "signing" | "submitting" | "confirming";
 export type PaymentFlowStatus =
@@ -20,6 +22,21 @@ export interface PaymentStepTiming {
   error: string | null;
 }
 
+/**
+ * Details rendered on the printed receipt (Issue #1045). All fields are
+ * optional — unknown values print as an em dash so a receipt is always
+ * producible from whatever the caller knows.
+ */
+export interface PaymentReceiptDetails {
+  sender?: string;
+  recipient?: string;
+  amount?: string;
+  asset?: string;
+  memo?: string;
+  /** Completion timestamp (ms epoch or ISO string) shown as date/time. */
+  completedAt?: number | string;
+}
+
 interface PaymentStatusModalProps {
   isOpen: boolean;
   status: PaymentFlowStatus;
@@ -30,13 +47,15 @@ interface PaymentStatusModalProps {
   onClose: () => void;
   explorerHref?: string | null;
   timeoutSeconds?: number;
+  /** Payment details for the printable receipt (success state). */
+  receipt?: PaymentReceiptDetails | null;
 }
 
-const STEP_ORDER: Array<{ id: PaymentStepId; label: string }> = [
-  { id: "building", label: "Building" },
-  { id: "signing", label: "Signing" },
-  { id: "submitting", label: "Submitting" },
-  { id: "confirming", label: "Confirming" },
+const STEP_ORDER: Array<{ id: PaymentStepId; labelKey: string }> = [
+  { id: "building", labelKey: "paymentStatus.steps.building" },
+  { id: "signing", labelKey: "paymentStatus.steps.signing" },
+  { id: "submitting", labelKey: "paymentStatus.steps.submitting" },
+  { id: "confirming", labelKey: "paymentStatus.steps.confirming" },
 ];
 
 export default function PaymentStatusModal({
@@ -49,7 +68,9 @@ export default function PaymentStatusModal({
   onClose,
   explorerHref,
   timeoutSeconds = TX_TIMEOUT_SECONDS,
+  receipt,
 }: PaymentStatusModalProps) {
+  const { t } = useTranslation();
   const [now, setNow] = useState(() => Date.now());
 
   const isTerminal = status === "success" || status === "error";
@@ -94,6 +115,33 @@ export default function PaymentStatusModal({
 
   if (!isOpen) return null;
 
+  // Issue #1045 — print receipt: mark the body so the print stylesheet
+  // hides everything except the receipt block, then invoke the browser
+  // print dialog once the styles have painted (double rAF). `window.print`
+  // blocks until the dialog closes, so the class is also removed
+  // synchronously afterwards as a belt-and-braces cleanup.
+  const handlePrintReceipt = () => {
+    document.body.classList.add("receipt-modal-printing");
+    const cleanup = () => {
+      document.body.classList.remove("receipt-modal-printing");
+      window.removeEventListener("afterprint", cleanup);
+    };
+    window.addEventListener("afterprint", cleanup);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        window.print();
+        cleanup();
+      });
+    });
+  };
+
+  const receiptDate = receipt?.completedAt
+    ? new Date(receipt.completedAt)
+    : new Date();
+  const receiptAmount = receipt?.amount
+    ? formatAssetPrecise(receipt.amount, receipt.asset ?? "XLM")
+    : null;
+
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm">
       <div
@@ -106,24 +154,24 @@ export default function PaymentStatusModal({
           <div className="flex items-start justify-between gap-4">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.24em] text-stellar-300/80">
-                Payment Tracker
+                {t("paymentStatus.tracker")}
               </p>
               <h3
                 id="payment-status-title"
                 className="mt-2 font-display text-xl font-semibold text-white"
               >
                 {status === "success"
-                  ? "Complete"
+                  ? t("paymentStatus.complete")
                   : status === "error"
-                    ? "Payment failed"
-                    : "Processing payment"}
+                    ? t("paymentStatus.paymentFailed")
+                    : t("paymentStatus.processingPayment")}
               </h3>
               <p className="mt-1 text-sm text-slate-400">
                 {status === "success"
-                  ? "Your transaction has been confirmed on the Stellar network."
+                  ? t("paymentStatus.successDescription")
                   : status === "error"
-                    ? "The transaction stopped before completion."
-                    : "Stay on this screen while we move through each network step."}
+                    ? t("paymentStatus.failureDescription")
+                    : t("paymentStatus.processingDescription")}
               </p>
             </div>
 
@@ -133,14 +181,14 @@ export default function PaymentStatusModal({
                 onClick={onClose}
                 className="rounded-lg border border-white/10 px-3 py-1.5 text-sm font-medium text-slate-300 transition-colors hover:border-white/20 hover:text-white"
               >
-                Close
+                {t("common.close")}
               </button>
             )}
           </div>
 
           <div className="mt-5">
             <div className="flex items-center justify-between text-xs text-slate-400">
-              <span>Progress</span>
+              <span>{t("paymentStatus.progress")}</span>
               <span>{Math.round(progress)}%</span>
             </div>
             <div className="mt-2 h-2 overflow-hidden rounded-full bg-white/5">
@@ -161,7 +209,7 @@ export default function PaymentStatusModal({
         </div>
 
         <div className="space-y-4 px-6 py-5">
-          {STEP_ORDER.map(({ id, label }, index) => {
+          {STEP_ORDER.map(({ id, labelKey }, index) => {
             const timing = stepTimings[id];
             const stepState = getStepState({
               id,
@@ -184,13 +232,14 @@ export default function PaymentStatusModal({
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div>
-                        <p className="text-sm font-semibold text-white">{label}</p>
+                        <p className="text-sm font-semibold text-white">{t(labelKey)}</p>
                         <p className="text-xs text-slate-400">
-                          {getStepCaption(stepState)}
+                          {t(getStepCaptionKey(stepState))}
                         </p>
                       </div>
                       <span className="text-xs font-medium text-slate-400">
-                        {formatElapsed(timing, now)}
+                        {formatElapsed(timing, now) ??
+                          t("paymentStatus.captions.waiting")}
                       </span>
                     </div>
 
@@ -207,7 +256,7 @@ export default function PaymentStatusModal({
 
           {status === "success" && (
             <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
-              <p className="font-medium">Transaction confirmed</p>
+              <p className="font-medium">{t("paymentStatus.transactionConfirmed")}</p>
               {txHash && <p className="mt-1 break-all text-emerald-100/90">{txHash}</p>}
               {explorerHref && txHash && (
                 <a
@@ -216,10 +265,21 @@ export default function PaymentStatusModal({
                   rel="noopener noreferrer"
                   className="mt-3 inline-flex items-center gap-2 text-sm font-medium text-emerald-100 transition-colors hover:text-white"
                 >
-                  View on Stellar Expert
+                  {t("paymentStatus.viewOnStellarExpert")}
                   <ExternalLinkIcon className="h-4 w-4" />
                 </a>
               )}
+
+              {/* Issue #1045 — paper/PDF receipt from the success state */}
+              <button
+                type="button"
+                onClick={handlePrintReceipt}
+                data-testid="print-receipt-button"
+                className="mt-3 inline-flex items-center gap-2 rounded-lg border border-emerald-400/30 px-3 py-1.5 text-sm font-medium text-emerald-100 transition-colors hover:bg-emerald-400/10 hover:text-white print:hidden"
+              >
+                <PrinterIcon className="h-4 w-4" />
+                {t("paymentStatus.printReceipt")}
+              </button>
             </div>
           )}
 
@@ -229,6 +289,63 @@ export default function PaymentStatusModal({
             </div>
           )}
         </div>
+
+        {/* Printable receipt (Issue #1045) — hidden on screen, shown by the
+            print stylesheet while body has .receipt-modal-printing. */}
+        {status === "success" && (
+          <div className="receipt-modal-sheet hidden" data-testid="payment-receipt-sheet">
+            <p className="receipt-brand">Stellar MicroPay</p>
+            <h4 className="receipt-title">{t("paymentStatus.receipt.title")}</h4>
+            <dl className="receipt-grid">
+              <div>
+                <dt>{t("paymentStatus.receipt.dateTime")}</dt>
+                <dd>{formatDateFull(receiptDate, { timezone: "UTC" })}</dd>
+              </div>
+              {receipt?.sender && (
+                <div>
+                  <dt>{t("paymentStatus.receipt.from")}</dt>
+                  <dd className="receipt-mono">{receipt.sender}</dd>
+                </div>
+              )}
+              {receipt?.recipient && (
+                <div>
+                  <dt>{t("paymentStatus.receipt.to")}</dt>
+                  <dd className="receipt-mono">{receipt.recipient}</dd>
+                </div>
+              )}
+              {receiptAmount && (
+                <div>
+                  <dt>{t("paymentStatus.receipt.amount")}</dt>
+                  <dd>{receiptAmount}</dd>
+                </div>
+              )}
+              {receipt?.memo && (
+                <div>
+                  <dt>{t("paymentStatus.receipt.memo")}</dt>
+                  <dd>{receipt.memo}</dd>
+                </div>
+              )}
+              {txHash && (
+                <div>
+                  <dt>{t("paymentStatus.receipt.transactionHash")}</dt>
+                  <dd className="receipt-mono break-all">{txHash}</dd>
+                </div>
+              )}
+              {explorerHref && txHash && (
+                <div>
+                  <dt>{t("paymentStatus.receipt.explorer")}</dt>
+                  <dd className="receipt-mono break-all">{explorerHref}</dd>
+                </div>
+              )}
+            </dl>
+            <p className="receipt-footer">
+              {t("paymentStatus.receipt.generatedBy", {
+                date: formatDateFull(new Date(), { timezone: "UTC" }),
+              })}
+            </p>
+          </div>
+        )}
+
       </div>
     </div>
   );
@@ -252,15 +369,15 @@ function getStepState({
   return "pending";
 }
 
-function getStepCaption(state: "pending" | "current" | "complete" | "failed") {
-  if (state === "complete") return "Completed";
-  if (state === "current") return "In progress";
-  if (state === "failed") return "Failed";
-  return "Waiting";
+function getStepCaptionKey(state: "pending" | "current" | "complete" | "failed") {
+  if (state === "complete") return "paymentStatus.captions.completed";
+  if (state === "current") return "paymentStatus.captions.inProgress";
+  if (state === "failed") return "paymentStatus.captions.failed";
+  return "paymentStatus.captions.waiting";
 }
 
-function formatElapsed(timing: PaymentStepTiming, now: number) {
-  if (!timing.startedAt) return "Waiting";
+function formatElapsed(timing: PaymentStepTiming, now: number): string | null {
+  if (!timing.startedAt) return null;
 
   const end = timing.completedAt ?? now;
   const elapsedMs = Math.max(0, end - timing.startedAt);
@@ -284,6 +401,8 @@ function CountdownTimer({
   timeoutSeconds: number;
   now: number;
 }) {
+  const { t } = useTranslation();
+
   if (!startedAt) return null;
 
   const elapsedMs = now - startedAt;
@@ -319,7 +438,9 @@ function CountdownTimer({
               : "text-slate-400"
         }`}
       >
-        {isUrgent ? `${remainingSeconds}s left` : `~${remainingSeconds}s remaining`}
+        {isUrgent
+          ? t("paymentStatus.timer.secondsLeft", { seconds: remainingSeconds })
+          : t("paymentStatus.timer.secondsRemaining", { seconds: remainingSeconds })}
       </span>
     </div>
   );
@@ -407,6 +528,14 @@ function SparklesIcon({ className }: { className?: string }) {
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M12 3.75 13.688 8.313 18.25 10l-4.563 1.688L12 16.25l-1.688-4.563L5.75 10l4.563-1.688L12 3.75Z" />
       <path strokeLinecap="round" strokeLinejoin="round" d="m18.75 15 .563 1.688L21 17.25l-1.688.563L18.75 19.5l-.563-1.688L16.5 17.25l1.688-.563L18.75 15Z" />
+    </svg>
+  );
+}
+
+function PrinterIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 9V3.75A1.75 1.75 0 018.5 2h7a1.75 1.75 0 011.75 1.75V9M7.5 18.75h9M5.25 9H18.75A2.25 2.25 0 0121 11.25v5.25a1.5 1.5 0 01-1.5 1.5h-2.25V15H6.75v3H4.5A1.5 1.5 0 013 16.5v-5.25A2.25 2.25 0 015.25 9z" />
     </svg>
   );
 }
